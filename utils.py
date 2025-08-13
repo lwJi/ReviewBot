@@ -3,7 +3,9 @@
 import os
 import json
 import hashlib
+from functools import lru_cache
 from typing import List, Tuple
+from typing import Any
 import yaml
 
 
@@ -101,3 +103,43 @@ def extract_json_from_text(text: str) -> str:
     if braces:
         return braces.group(0)
     return text  # best effort
+
+# ---------- Token utilities ----------
+@lru_cache(maxsize=64)
+def _get_encoding_for_model(model: str):
+    try:
+        import tiktoken
+    except Exception:
+        raise RuntimeError("tiktoken is required for token estimation. Please install it.")
+    try:
+        # Best effort: ask tiktoken for the model; fall back sensibly
+        return tiktoken.encoding_for_model(model)
+    except Exception:
+        # Prefer o200k_base (4o-family); then cl100k_base
+        try:
+            return tiktoken.get_encoding("o200k_base")
+        except Exception:
+            return tiktoken.get_encoding("cl100k_base")
+
+def count_tokens_text(model: str, text: str) -> int:
+    """
+    Approximate token count for a single text message to a chat model.
+    Does not include minor chat-message overhead; close enough for planning.
+    """
+    enc = _get_encoding_for_model(model)
+    return len(enc.encode(text))
+
+def get_model_name(llm: Any, default: str = "gpt-4o") -> str:
+    """
+    Best-effort retrieval of the model id from a LangChain ChatOpenAI (or similar) instance.
+    Falls back to `default` if not found. Keeps our preflight robust across lib versions.
+    """
+    for attr in ("model", "model_name", "model_id"):
+        val = getattr(llm, attr, None)
+        if isinstance(val, str) and val:
+            return val
+    # Some wrappers keep config in a dict-like .kwargs/.model_kwargs; try those lightly
+    for attr in ("kwargs", "model_kwargs"):
+        d = getattr(llm, attr, None)
+        if isinstance(d, dict) and isinstance(d.get("model"), str): return d["model"]
+    return default

@@ -5,4 +5,4 @@ python-dotenv==1.0.1
 tenacity==8.2.3
 rich==13.7.1
 PyYAML==6.0.2
-
+tiktoken==0.7.0

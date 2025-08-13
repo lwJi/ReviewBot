@@ -7,16 +7,19 @@ from typing import List, Dict
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.progress import Progress, SpinnerColumn, TextColumn
+from rich.table import Table
 
 from langchain_openai import ChatOpenAI
 
 from utils import (
     list_source_files, detect_language_from_extension, chunk_code_by_lines,
     add_line_numbers_preserve, safe_filename_from_path,
-    save_json, save_text, load_models_config, ensure_dir, content_hash
+    save_json, save_text, load_models_config, ensure_dir, content_hash,
+    count_tokens_text, get_model_name
 )
 from agents import (
-    run_worker_agent, run_supervisor_agent, run_synthesizer_agent, format_reviews_for_supervisor
+    run_worker_agent, run_supervisor_agent, run_synthesizer_agent, format_reviews_for_supervisor,
+    render_worker_prompt_text, render_supervisor_prompt_text, render_synthesizer_prompt_text
 )
 
 console = Console()
@@ -173,6 +176,76 @@ async def review_single_file(
     console.print(f"[bold green]✓ Saved[/bold green] Markdown: {md_path}\n")
 
 
+def preflight_estimate(
+    *,
+    llms: Dict[str, ChatOpenAI],
+    files: List[str],
+    chunk_size: int,
+    chunk_threshold: int,
+    assume_worker_out: int,
+    assume_supervisor_out: int,
+    assume_synthesizer_out: int,
+) -> Dict[str, int]:
+    """
+    Build prompts (without API calls), estimate tokens before running.
+    Returns a dict of totals.
+    """
+    total_workers_calls = 0
+    total_supervisor_calls = 0
+    total_synthesizer_calls = 0
+    total_in = total_out = 0
+
+    worker_models = [get_model_name(w) for w in llms["workers"]]
+    supervisor_model = get_model_name(llms["supervisor"])
+    synthesizer_model = get_model_name(llms["synthesizer"])
+
+    for fp in files:
+        # Read code and chunk like the real run
+        try:
+            with open(fp, "r", encoding="utf-8") as f:
+                code = f.read()
+        except Exception:
+            continue
+        language = detect_language_from_extension(os.path.splitext(fp)[1])
+        lines = code.splitlines()
+        chunks = chunk_code_by_lines(code, max_lines=chunk_size) if len(lines) > chunk_threshold else [(1, code)]
+        total_chunks = len(chunks)
+
+        # Workers & supervisor per chunk
+        for idx, (start, chunk_text) in enumerate(chunks, start=1):
+            numbered = add_line_numbers_preserve(chunk_text, start_line=start)
+            # Workers
+            for wm in worker_models:
+                prompt_text = render_worker_prompt_text(
+                    language=language, file_path=fp, chunk_index=idx, total_chunks=total_chunks,
+                    code_with_line_numbers=numbered
+                )
+                total_in += count_tokens_text(wm, prompt_text)
+                total_out += assume_worker_out
+                total_workers_calls += 1
+            # Supervisor (input includes reviews JSON from workers; approximate by sum of worker outs)
+            sup_static = count_tokens_text(supervisor_model, render_supervisor_prompt_text(reviews_text_block=""))
+            sup_in = sup_static + sum([assume_worker_out for _ in worker_models])
+            total_in += sup_in
+            total_out += assume_supervisor_out
+            total_supervisor_calls += 1
+
+        # Synthesizer per file (input includes one JSON line per chunk; estimate per-chunk size ~ small)
+        synth_static = count_tokens_text(synthesizer_model, render_synthesizer_prompt_text(chunk_summaries_jsonl=""))
+        synth_in = synth_static + total_chunks * 150  # conservative per-chunk summary JSONL size
+        total_in += synth_in
+        total_out += assume_synthesizer_out
+        total_synthesizer_calls += 1
+
+    return dict(
+        worker_calls=total_workers_calls,
+        supervisor_calls=total_supervisor_calls,
+        synthesizer_calls=total_synthesizer_calls,
+        tokens_in=total_in,
+        tokens_out=total_out,
+        tokens_total=total_in + total_out,
+    )
+
 async def main():
     parser = argparse.ArgumentParser(
         description="AI Multi-Agent Code Review Tool (Improved)")
@@ -187,6 +260,15 @@ async def main():
                         default=DEFAULT_CHUNK_SIZE, help="Max lines per chunk")
     parser.add_argument("--chunk-threshold", type=int, default=DEFAULT_MAX_LINES,
                         help="If file exceeds this many lines, chunk it")
+    parser.add_argument("--assume-worker-out", type=int, default=900,
+                        help="Assumed max output tokens per worker review")
+    parser.add_argument("--assume-supervisor-out", type=int, default=400,
+                        help="Assumed max output tokens per supervisor decision")
+    parser.add_argument("--assume-synthesizer-out", type=int, default=700,
+                        help="Assumed max output tokens per synthesizer result")
+    parser.add_argument("--skip-preflight", action="store_true",
+                        help="Run without token preflight/approval")
+
     args = parser.parse_args()
 
     console.print(
@@ -209,6 +291,40 @@ async def main():
         console.print(f"[yellow]No files with {args.extensions} under '{
                       args.directory}'.[/yellow]")
         return
+
+    # ----- Preflight estimation & approval -----
+    if not args.skip_preflight:
+        est = preflight_estimate(
+            llms=llms,
+            files=files,
+            chunk_size=args.chunk_size,
+            chunk_threshold=args.chunk_threshold,
+            assume_worker_out=args.assume_worker_out,
+            assume_supervisor_out=args.assume_supervisor_out,
+            assume_synthesizer_out=args.assume_synthesizer_out,
+        )
+        table = Table(title="Token Preflight (approx.)")
+        table.add_column("Stage")
+        table.add_column("Calls", justify="right")
+        table.add_column("Input toks", justify="right")
+        table.add_column("Output toks", justify="right")
+        table.add_row("Workers", str(est["worker_calls"]), "-", str(args.assume_worker_out * est["worker_calls"]))
+        table.add_row("Supervisor", str(est["supervisor_calls"]), "-", str(args.assume_supervisor_out * est["supervisor_calls"]))
+        table.add_row("Synthesizer", str(est["synthesizer_calls"]), "-", str(args.assume_synthesizer_out * est["synthesizer_calls"]))
+        table.add_row("—", "—", "—", "—")
+        table.add_row("Totals", "", str(est["tokens_in"]), str(est["tokens_out"]))
+        console.print(table)
+        console.print("[dim]Note: counts approximate; small chat overhead not included. Adjust --assume-* flags if needed.[/dim]")
+
+        # Ask for approval
+        console.print("\n[bold]Proceed with API calls?[/bold] [y/N]: ", end="")
+        try:
+            answer = input().strip().lower()
+        except EOFError:
+            answer = "n"
+        if answer not in ("y", "yes"):
+            console.print("[yellow]Aborted by user before any API calls.[/yellow]")
+            return
 
     console.print(f"Found {len(files)} file(s).")
 

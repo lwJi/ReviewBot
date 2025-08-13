@@ -26,6 +26,26 @@ async def _ainvoke_with_retry(chain, inputs: dict, attempts: int = 4) -> str:
             return await chain.ainvoke(inputs)
     raise RuntimeError("Exhausted retries")
 
+def render_worker_prompt_text(
+    *, language: str, file_path: str, chunk_index: int, total_chunks: int, code_with_line_numbers: str
+) -> str:
+    worker_prompt = _pick_worker_prompt(language)
+    return worker_prompt.format(
+        **(
+            {"language": language} if worker_prompt is WORKER_PROMPT_GENERIC else {}
+        ),
+        file_path=file_path,
+        chunk_index=chunk_index,
+        total_chunks=total_chunks,
+        code_with_line_numbers=code_with_line_numbers,
+        json_schema=JSON_WORKER_SCHEMA,
+    )
+
+def render_supervisor_prompt_text(*, reviews_text_block: str) -> str:
+    return SUPERVISOR_PROMPT.format(reviews=reviews_text_block, json_schema=JSON_SUPERVISOR_SCHEMA)
+
+def render_synthesizer_prompt_text(*, chunk_summaries_jsonl: str) -> str:
+    return SYNTHESIZER_PROMPT.format(chunk_summaries=chunk_summaries_jsonl)
 
 def _pick_worker_prompt(language: str):
     if language == "cpp":
