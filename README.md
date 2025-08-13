@@ -4,18 +4,35 @@ Review Code with LLM
 * Step 1: Install Dependencies
 
     ```
-    pip install -r requirements.txt
+    pip install -r src/requirements.txt
     ```
 
 * Step 2: Set Your API Key
 
-* Step 3: Run the Review
+    Create a `.reviewbot.env` in your **Home** directory:
+
+    - Home (checked in this order): `~/.reviewbot.env`, `~/.env`, `~/.config/reviewbot/env`
+
+    Put your key inside:
 
     ```
-    # Run review on the src directory for .cpp and .hpp files
-    python main.py src --extensions .cpp .hpp
+    OPENAI_API_KEY=sk-...
     ```
-    or
+
+* Step 3: Run the Review
+
+    Example: review your project code directory "myproj" for .cxx and .hxx files
+
     ```
-    python main.py src
+    python src/ReviewBot myproj --extensions .cxx .hxx
     ```
+
+    Or review all default extensions (.cxx .hxx .h .py)
+
+    ```
+    python src/ReviewBot myproj
+    ```
+
+* Optional:
+
+    - Copy `src/models.example.yaml` to `models.yaml` and tweak models/temperatures.
