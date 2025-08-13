@@ -3,20 +3,23 @@ from langchain.prompts import PromptTemplate
 
 # ---------- Common JSON guidance ----------
 JSON_WORKER_SCHEMA = """
-Return ONLY valid JSON with this structure (no prose outside JSON):
+Return ONLY valid JSON with this exact object shape (no prose outside JSON). All keys must be present.
+Allowed values:
+- type ∈ {"bug","performance","style","maintainability"}
+- severity ∈ {"low","medium","high","critical"}
 
 {
   "summary": "one-paragraph overview of key issues and themes",
   "findings": [
     {
-      "type": "bug | performance | style | maintainability",
+      "type": "bug",
       "title": "short title",
-      "severity": "low | medium | high | critical",
-      "lines": [12, 13],          // line numbers from the provided code
+      "severity": "medium",
+      "lines": [12, 13],
       "snippet": "small relevant code excerpt (<= 10 lines)",
       "explanation": "why this is an issue",
       "suggestion": "actionable fix or improvement",
-      "diff": "optional unified diff patch (can be empty string if not applicable)"
+      "diff": ""
     }
   ],
   "counts": {"bug": 0, "performance": 0, "style": 0, "maintainability": 0}
